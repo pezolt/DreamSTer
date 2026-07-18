@@ -76,6 +76,7 @@ Dynarec.SmcCheckLevel = 0
 Dynarec.idleskip = yes
 Dynarec.safe-mode = yes
 Dynarec.unstable-opt = no
+Freerunning = no
 SavePopup.isShown = no
 Social.HideCallToAction = no
 aica.LimitFPS = yes
@@ -128,11 +129,15 @@ device4.2 = 8
 # ---------------------------------------------------------------- config ---
 
 class Option:
-    def __init__(self, label, key, choices, default):
+    def __init__(self, label, key, choices, default, enabled=None):
         self.label = label
         self.key = key                 # key inside [config]
         self.choices = choices         # list of (value, display)
         self.default = default
+        self._enabled = enabled        # callable(cfg) -> bool, None = always
+
+    def enabled(self, cfg):
+        return self._enabled(cfg) if self._enabled else True
 
     def current(self, cfg):
         return cfg.get("config", self.key, fallback=self.default)
@@ -187,20 +192,29 @@ class AudioOption(Option):
             cfg.set("config", self.key, "yes" if val == "synced" else "no")
 
 
+def _is_freerunning(cfg):
+    # same truthy set as minicast's cfgLoadBool
+    v = cfg.get("config", "Freerunning", fallback="no").strip().lower()
+    return v in ("yes", "true", "on", "1")
+
+
 OPTION_GROUPS = [
     ("Console", [
         Option("Cable Mode", "Dreamcast.Cable",
                [("0", "VGA"), ("3", "TV Composite")], "0"),
     ]),
     ("Minicast", [
+        Option("Time Reconciliation", "Freerunning",
+               [("no", "Prioritize Video"), ("yes", "Prioritize Audio")], "no"),
+        AudioOption(),
+        Option("FPS Target", "pvr.FPSTarget",
+               [("66", "60 FPS"), ("55", "50 FPS"),
+                ("33", "30 FPS"), ("28", "25 FPS")], "66",
+               enabled=lambda cfg: not _is_freerunning(cfg)),
         Option("Unstable SH4 Optimizations", "Dynarec.unstable-opt",
                [("no", "No"), ("yes", "Yes")], "no"),
         Option("Multithreaded TA", "pvr.MultithreadedTA",
                [("0", "Off"), ("1", "Safe"), ("2", "Full")], "1"),
-        Option("FPS Target", "pvr.FPSTarget",
-               [("66", "60 FPS"), ("55", "50 FPS"),
-                ("33", "30 FPS"), ("28", "25 FPS")], "66"),
-        AudioOption(),
     ]),
     ("polly2", [
         Option("AutoReset", "polly2.AutoReset",
@@ -1560,7 +1574,10 @@ def config_screen(scr, cfg, game_rel):
                 opt = row[1]
                 label = "%-28s" % opt.label
                 value = "< %s >" % opt.display(cfg)
-                if is_sel:
+                if not opt.enabled(cfg):
+                    put(yv, 6, label, color(C_DIM))
+                    put(yv, 6 + len(label) + 2, value, color(C_DIM))
+                elif is_sel:
                     put(yv, 4, "> " + label, color(C_SEL, curses.A_BOLD))
                     put(yv, 6 + len(label) + 2, value,
                         color(C_SEL, curses.A_BOLD))
@@ -1572,18 +1589,28 @@ def config_screen(scr, cfg, game_rel):
         safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
         scr.refresh()
 
+        def move_sel(delta):
+            # skip disabled options (grayed out, not selectable)
+            s = sel
+            for _ in range(len(selectable)):
+                s = (s + delta) % len(selectable)
+                r = rows[selectable[s]]
+                if r[0] != "opt" or r[1].enabled(cfg):
+                    return s
+            return sel
+
         ch = nav_getch(scr)
         row = rows[selectable[sel]]
         if ch == curses.KEY_UP:
-            sel = (sel - 1) % len(selectable)
+            sel = move_sel(-1)
         elif ch == curses.KEY_DOWN:
-            sel = (sel + 1) % len(selectable)
+            sel = move_sel(1)
         elif ch in KEY_ENTER and row[0] == "launch":
             return True
         elif ch in KEY_ENTER and row[0] == "back":
             return False
         elif ch in (curses.KEY_LEFT, curses.KEY_RIGHT) or ch in KEY_ENTER:
-            if row[0] == "opt":
+            if row[0] == "opt" and row[1].enabled(cfg):
                 row[1].cycle(cfg, -1 if ch == curses.KEY_LEFT else 1)
                 save_cfg(cfg)
 
