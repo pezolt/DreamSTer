@@ -253,6 +253,8 @@ OPT_BOOL = [("no", "Off"), ("yes", "On")]
 # the expanded optimization set; grayed out (values driven by the preset)
 # unless Optimizations = Custom. Defaults are the Balanced preset.
 OPT_ITEMS = [
+    Option("  Async GDROM", "gdrom.AsyncDMA",
+           OPT_BOOL, "yes", enabled=_opt_custom),
     Option("  Div1 Matching", "Dynarec.opt_div1_som",
            OPT_BOOL, "yes", enabled=_opt_custom),
     Option("  Constprop", "Dynarec.opt_constprop",
@@ -276,6 +278,7 @@ OPT_ITEMS = [
 # preset name -> {cfg key: value} over exactly the OPT_ITEMS keys
 OPT_PRESETS = {
     "none": {
+        "gdrom.AsyncDMA": "no",
         "Dynarec.opt_div1_som": "no",
         "Dynarec.opt_constprop": "0",
         "Dynarec.opt_fipr_w": "no",
@@ -286,6 +289,7 @@ OPT_PRESETS = {
         "Dynarec.opt_readm_pairs": "no",
     },
     "safe": {
+        "gdrom.AsyncDMA": "yes",
         "Dynarec.opt_div1_som": "yes",
         "Dynarec.opt_constprop": "1",
         "Dynarec.opt_fipr_w": "yes",
@@ -296,6 +300,7 @@ OPT_PRESETS = {
         "Dynarec.opt_readm_pairs": "no",
     },
     "balanced": {
+        "gdrom.AsyncDMA": "yes",
         "Dynarec.opt_div1_som": "yes",
         "Dynarec.opt_constprop": "2",
         "Dynarec.opt_fipr_w": "yes",
@@ -306,6 +311,7 @@ OPT_PRESETS = {
         "Dynarec.opt_readm_pairs": "no",
     },
     "max": {
+        "gdrom.AsyncDMA": "yes",
         "Dynarec.opt_div1_som": "yes",
         "Dynarec.opt_constprop": "2",
         "Dynarec.opt_fipr_w": "yes",
