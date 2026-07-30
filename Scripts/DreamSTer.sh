@@ -34,6 +34,10 @@ BOOT_BIN = os.path.join(SYSTEM_DIR, "dc_boot.bin")
 FLASH_BIN = os.path.join(SYSTEM_DIR, "dc_flash.bin")
 CFG_PATH = os.path.join(SYSTEM_DIR, "emu.cfg")
 
+# [dreamster] Version stamp; a cfg without exactly this value is from a
+# different release and is reset (after a warning) before the UI runs.
+CFG_VERSION = "r6"
+
 MINICAST_DIR = "/media/fat/minicast"
 LOAD_BITSTREAM = os.path.join(MINICAST_DIR, "load_fpga_bitstream")
 BITSTREAM_RBF = os.path.join(MINICAST_DIR, "polly2-rtl.rbf")
@@ -63,30 +67,39 @@ Cloudroms.ShowArchiveOrg = no
 Debug.SerialConsoleEnabled = no
 Debug.VirtualSerialPort = no
 Debug.VirtualSerialPortFile =
-Dreamcast.Broadcast = 4
+Dreamcast.Broadcast = 0
 Dreamcast.Cable = 0
 Dreamcast.ContentPath =
 Dreamcast.FullMMU = no
 Dreamcast.Language = 6
-Dreamcast.Region = 3
+Dreamcast.Region = 1
 Dynarec.DspEnabled = 1
 Dynarec.Enabled = yes
 Dynarec.ScpuEnabled = 1
 Dynarec.SmcCheckLevel = 0
 Dynarec.idleskip = yes
+Dynarec.opt_constprop = 2
+Dynarec.opt_cyclecheck_backwards_only = yes
+Dynarec.opt_div1_som = yes
+Dynarec.opt_fipr_w = yes
+Dynarec.opt_readm_pairs = no
+Dynarec.opt_sqw_on_pref = no
+Dynarec.opt_sqw_rewrite = no
 Dynarec.safe-mode = yes
 Dynarec.unstable-opt = no
+Freerunning = no
 SavePopup.isShown = no
 Social.HideCallToAction = no
 aica.LimitFPS = yes
 aica.NoBatch = no
 aica.NoSound = no
-polly2.AutoReset = no
+polly2.AutoReset = yes
 polly2.ClockSel = 3
+polly2.DumpOnLockup = no
 pvr.FPSTarget = 66
 pvr.ForceGLES2 = no
 pvr.MaxThreads = 3
-pvr.MultithreadedTA = 1
+pvr.MultithreadedTA = 2
 pvr.SynchronousRendering = no
 pvr.backend = auto
 rend.Clipping = yes
@@ -106,6 +119,11 @@ rend.ShowFPS = no
 rend.TextureUpscale = 1
 rend.WideScreen = no
 ta.skip = 0
+
+[dreamster]
+OptMode = balanced
+Overclock = 0
+Version = r6
 
 [input]
 MouseSensitivity = 100
@@ -128,14 +146,20 @@ device4.2 = 8
 # ---------------------------------------------------------------- config ---
 
 class Option:
-    def __init__(self, label, key, choices, default):
+    def __init__(self, label, key, choices, default, enabled=None,
+                 section="config"):
         self.label = label
-        self.key = key                 # key inside [config]
+        self.section = section
+        self.key = key                 # key inside [section]
         self.choices = choices         # list of (value, display)
         self.default = default
+        self._enabled = enabled        # callable(cfg) -> bool, None = always
+
+    def enabled(self, cfg):
+        return self._enabled(cfg) if self._enabled else True
 
     def current(self, cfg):
-        return cfg.get("config", self.key, fallback=self.default)
+        return cfg.get(self.section, self.key, fallback=self.default).strip()
 
     def display(self, cfg):
         val = self.current(cfg)
@@ -144,13 +168,31 @@ class Option:
                 return name
         return "? (%s)" % val
 
+    def set(self, cfg, value):
+        if not cfg.has_section(self.section):
+            cfg.add_section(self.section)
+        cfg.set(self.section, self.key, value)
+
     def cycle(self, cfg, direction):
         val = self.current(cfg)
         idx = next((i for i, (v, _) in enumerate(self.choices) if v == val), -1)
         idx = (idx + direction) % len(self.choices)
-        if not cfg.has_section("config"):
-            cfg.add_section("config")
-        cfg.set("config", self.key, self.choices[idx][0])
+        self.set(cfg, self.choices[idx][0])
+
+
+class RegionOption(Option):
+    """Console region; the matching Broadcast standard is written with it."""
+
+    BROADCAST = {"1": "0", "0": "0", "2": "1"}  # US/JP -> NTSC, EU -> PAL
+
+    def __init__(self):
+        Option.__init__(self, "Region", "Dreamcast.Region",
+                        [("1", "NTSC-US"), ("0", "NTSC-JP"), ("2", "PAL")],
+                        "1")
+
+    def set(self, cfg, value):
+        Option.set(self, cfg, value)
+        cfg.set("config", "Dreamcast.Broadcast", self.BROADCAST[value])
 
 
 class AudioOption(Option):
@@ -175,41 +217,245 @@ class AudioOption(Option):
         v = cfg.get("config", self.key, fallback="yes").strip().lower()
         return "synced" if v in ("yes", "true", "on", "1") else "unsynced"
 
-    def cycle(self, cfg, direction):
-        val = self.current(cfg)
-        idx = next(i for i, (v, _) in enumerate(self.choices) if v == val)
-        val = self.choices[(idx + direction) % len(self.choices)][0]
+    def set(self, cfg, value):
         for section in ("audio", "config"):
             if not cfg.has_section(section):
                 cfg.add_section(section)
-        cfg.set("audio", "disable", "1" if val == "off" else "0")
-        if val != "off":
-            cfg.set("config", self.key, "yes" if val == "synced" else "no")
+        cfg.set("audio", "disable", "1" if value == "off" else "0")
+        if value != "off":
+            cfg.set("config", self.key, "yes" if value == "synced" else "no")
+
+    def cycle(self, cfg, direction):
+        val = self.current(cfg)
+        idx = next(i for i, (v, _) in enumerate(self.choices) if v == val)
+        self.set(cfg, self.choices[(idx + direction) % len(self.choices)][0])
 
 
-OPTION_GROUPS = [
-    ("Console", [
-        Option("Cable Mode", "Dreamcast.Cable",
-               [("0", "VGA"), ("3", "TV Composite")], "0"),
-    ]),
-    ("Minicast", [
-        Option("Unstable SH4 Optimizations", "Dynarec.unstable-opt",
-               [("no", "No"), ("yes", "Yes")], "no"),
-        Option("Multithreaded TA", "pvr.MultithreadedTA",
-               [("0", "Off"), ("1", "Safe"), ("2", "Full")], "1"),
-        Option("FPS Target", "pvr.FPSTarget",
-               [("66", "60 FPS"), ("55", "50 FPS"),
-                ("33", "30 FPS"), ("28", "25 FPS")], "66"),
-        AudioOption(),
-    ]),
-    ("polly2", [
-        Option("AutoReset", "polly2.AutoReset",
-               [("no", "No"), ("yes", "Yes")], "no"),
-        Option("Clock", "polly2.ClockSel",
-               [("3", "112 MHz"), ("0", "75 MHz"),
-                ("1", "90 MHz"), ("2", "100 MHz")], "3"),
-    ]),
+def _is_freerunning(cfg):
+    # same truthy set as minicast's cfgLoadBool
+    v = cfg.get("config", "Freerunning", fallback="no").strip().lower()
+    return v in ("yes", "true", "on", "1")
+
+
+# ------------------------------------------------- optimization presets ---
+
+def opt_mode(cfg):
+    v = cfg.get("dreamster", "OptMode", fallback="balanced").strip().lower()
+    return v if v in OPT_PRESETS or v == "custom" else "balanced"
+
+
+def _opt_custom(cfg):
+    return opt_mode(cfg) == "custom"
+
+
+OPT_BOOL = [("no", "Off"), ("yes", "On")]
+
+# the expanded optimization set; grayed out (values driven by the preset)
+# unless Optimizations = Custom. Defaults are the Balanced preset.
+OPT_ITEMS = [
+    Option("  Async GDROM", "gdrom.AsyncDMA",
+           OPT_BOOL, "yes", enabled=_opt_custom),
+    Option("  Div1 Matching", "Dynarec.opt_div1_som",
+           OPT_BOOL, "yes", enabled=_opt_custom),
+    Option("  Constprop", "Dynarec.opt_constprop",
+           [("0", "Off"), ("1", "Safe"), ("2", "Include same page")], "2",
+           enabled=_opt_custom),
+    Option("  FIPR Constant W", "Dynarec.opt_fipr_w",
+           OPT_BOOL, "yes", enabled=_opt_custom),
+    Option("  Multithreaded TA", "pvr.MultithreadedTA",
+           [("0", "Off"), ("1", "Safe"), ("2", "Fully Async")], "2",
+           enabled=_opt_custom),
+    Option("  Reduced Cycle Checks", "Dynarec.opt_cyclecheck_backwards_only",
+           OPT_BOOL, "yes", enabled=_opt_custom),
+    Option("  SQW On Pref", "Dynarec.opt_sqw_on_pref",
+           OPT_BOOL, "no", enabled=_opt_custom),
+    Option("  SQW Static Rewrite", "Dynarec.opt_sqw_rewrite",
+           OPT_BOOL, "no", enabled=_opt_custom),
+    Option("  ReadMem Pairing", "Dynarec.opt_readm_pairs",
+           OPT_BOOL, "no", enabled=_opt_custom),
 ]
+
+# preset name -> {cfg key: value} over exactly the OPT_ITEMS keys
+OPT_PRESETS = {
+    "none": {
+        "gdrom.AsyncDMA": "no",
+        "Dynarec.opt_div1_som": "no",
+        "Dynarec.opt_constprop": "0",
+        "Dynarec.opt_fipr_w": "no",
+        "pvr.MultithreadedTA": "0",
+        "Dynarec.opt_cyclecheck_backwards_only": "no",
+        "Dynarec.opt_sqw_on_pref": "no",
+        "Dynarec.opt_sqw_rewrite": "no",
+        "Dynarec.opt_readm_pairs": "no",
+    },
+    "safe": {
+        "gdrom.AsyncDMA": "yes",
+        "Dynarec.opt_div1_som": "yes",
+        "Dynarec.opt_constprop": "1",
+        "Dynarec.opt_fipr_w": "yes",
+        "pvr.MultithreadedTA": "1",
+        "Dynarec.opt_cyclecheck_backwards_only": "no",
+        "Dynarec.opt_sqw_on_pref": "no",
+        "Dynarec.opt_sqw_rewrite": "no",
+        "Dynarec.opt_readm_pairs": "no",
+    },
+    "balanced": {
+        "gdrom.AsyncDMA": "yes",
+        "Dynarec.opt_div1_som": "yes",
+        "Dynarec.opt_constprop": "2",
+        "Dynarec.opt_fipr_w": "yes",
+        "pvr.MultithreadedTA": "2",
+        "Dynarec.opt_cyclecheck_backwards_only": "yes",
+        "Dynarec.opt_sqw_on_pref": "no",
+        "Dynarec.opt_sqw_rewrite": "no",
+        "Dynarec.opt_readm_pairs": "no",
+    },
+    "max": {
+        "gdrom.AsyncDMA": "yes",
+        "Dynarec.opt_div1_som": "yes",
+        "Dynarec.opt_constprop": "2",
+        "Dynarec.opt_fipr_w": "yes",
+        "pvr.MultithreadedTA": "2",
+        "Dynarec.opt_cyclecheck_backwards_only": "yes",
+        "Dynarec.opt_sqw_on_pref": "yes",
+        "Dynarec.opt_sqw_rewrite": "yes",
+        "Dynarec.opt_readm_pairs": "yes",
+    },
+}
+
+
+class OptModeOption(Option):
+    """Preset selector; choosing a preset writes its values to emu.cfg so
+    minicast (and the grayed-out rows) always read the effective ones."""
+
+    def __init__(self):
+        Option.__init__(self, "Optimizations", "OptMode",
+                        [("none", "None"), ("safe", "Safe"),
+                         ("balanced", "Balanced"), ("max", "Max Speed"),
+                         ("custom", "Custom")], "balanced",
+                        section="dreamster")
+
+    def current(self, cfg):
+        return opt_mode(cfg)
+
+    def set(self, cfg, value):
+        Option.set(self, cfg, value)
+        preset = OPT_PRESETS.get(value)
+        if preset:
+            for opt in OPT_ITEMS:
+                opt.set(cfg, preset[opt.key])
+
+
+REGION_OPT = RegionOption()
+CABLE_OPT = Option("Cable Type", "Dreamcast.Cable",
+                   [("0", "VGA"), ("3", "Composite")], "0")
+OVERCLOCK_OPT = Option("Overclock", "Overclock",
+                       [("0", "No overclock"), ("1", "1 GHz")], "0",
+                       section="dreamster")
+TIMEREC_OPT = Option("Time Reconciliation", "Freerunning",
+                     [("no", "Prefer Video"), ("yes", "Prefer Audio")], "no")
+AUDIO_OPT = AudioOption()
+FPS_OPT = Option("FPS Target", "pvr.FPSTarget",
+                 [("66", "60 FPS"), ("55", "50 FPS"),
+                  ("33", "30 FPS"), ("28", "25 FPS")], "66",
+                 enabled=lambda cfg: not _is_freerunning(cfg))
+OPTMODE_OPT = OptModeOption()
+AUTORESET_OPT = Option("AutoReset", "polly2.AutoReset", OPT_BOOL, "yes")
+CLOCK_OPT = Option("Clock", "polly2.ClockSel",
+                   [("0", "75 MHz"), ("1", "90 MHz"),
+                    ("2", "100 MHz"), ("3", "112 MHz")], "3")
+DUMP_OPT = Option("Store Crash Dump", "polly2.DumpOnLockup", OPT_BOOL, "no")
+
+# every option Restore Defaults resets; OPTMODE last so the balanced preset
+# is what ends up in the OPT_ITEMS keys
+ALL_OPTIONS = [REGION_OPT, CABLE_OPT, OVERCLOCK_OPT, TIMEREC_OPT, AUDIO_OPT,
+               FPS_OPT, AUTORESET_OPT, CLOCK_OPT, DUMP_OPT] + OPT_ITEMS \
+              + [OPTMODE_OPT]
+
+
+# ------------------------------------------------- dreamcast peripherals ---
+# [input] deviceN main maple device + deviceN.1/.2 expansion slots;
+# MDT values: 0 controller, 1 VMU, 3 vibration pack, 4 keyboard, 5 mouse,
+# 8 none.
+
+PERIPHERALS = [
+    ("none", "None", ("8", "8", "8")),
+    ("pad_vmu_vib", "Gamepad + VMU + Vibration", ("0", "1", "3")),
+    ("pad_2vmu", "Gamepad + 2x VMU", ("0", "1", "1")),
+    ("keyboard", "Keyboard", ("4", "8", "8")),
+    ("mouse", "Mouse", ("5", "8", "8")),
+]
+PERIPHERAL_LABELS = dict((pid, label) for pid, label, _ in PERIPHERALS)
+
+
+def _periph_keys(port):
+    d = "device%d" % (port + 1)
+    return (d, d + ".1", d + ".2")
+
+
+def get_port_peripheral(cfg, port):
+    """Peripheral id for a port, or None if the cfg holds something else."""
+    keys = _periph_keys(port)
+    vals = tuple(cfg.get("input", k, fallback="8").strip() for k in keys)
+    for pid, _, v in PERIPHERALS:
+        if v[0] != vals[0]:
+            continue
+        # expansion slots only distinguish the controller flavors
+        if vals[0] != "0" or v[1:] == vals[1:]:
+            return pid
+    return None
+
+
+def set_port_peripheral(cfg, port, pid):
+    vals = dict((p, v) for p, _, v in PERIPHERALS)[pid]
+    if not cfg.has_section("input"):
+        cfg.add_section("input")
+    for key, val in zip(_periph_keys(port), vals):
+        cfg.set("input", key, val)
+
+
+def port_accepts(cfg, port, dev_kind):
+    """Keyboard/Mouse ports only take matching devices; controller (and
+    None/unknown) ports take anything - keyboards and mice can still act
+    as gamepads there."""
+    main = cfg.get("input", "device%d" % (port + 1), fallback="8").strip()
+    if main == "4":
+        return dev_kind == "keyboard"
+    if main == "5":
+        return dev_kind == "mouse"
+    return True
+
+
+def restore_defaults(cfg):
+    """Everything back to stock: options, peripherals, input mappings."""
+    for opt in ALL_OPTIONS:
+        opt.set(cfg, opt.default)
+    for port in range(4):
+        set_port_peripheral(cfg, port, "pad_2vmu" if port == 0 else "none")
+    for section in list(cfg.sections()):
+        if re.match(r"input\d+$", section):
+            cfg.remove_section(section)
+    CONFIG.clear()
+    PORTS.clear()
+    # re-materialize the per-kind default mappings for connected devices
+    # (all on Port A) so emu.cfg holds a working input config again
+    save_input_config(cfg, scan_devices())
+
+
+def reset_all_configuration():
+    """Version-mismatch reset: rewrite emu.cfg from the pristine template
+    (dropping any stale keys from other releases), then re-materialize
+    default input mappings. Returns the fresh cfg."""
+    try:
+        with open(CFG_PATH, "w") as f:
+            f.write(DEFAULT_CFG)
+    except OSError:
+        pass
+    cfg = load_cfg()
+    CONFIG.clear()
+    PORTS.clear()
+    save_input_config(cfg, scan_devices())
+    return cfg
 
 
 def load_cfg():
@@ -539,6 +785,15 @@ def drain(fd):
 # the per-kind defaults below; an explicit empty dict (after "Remove
 # configuration") means inactive. Persisted in emu.cfg [input0]..[inputN].
 CONFIG = {}
+# device id -> maple port 0..3 (A..D); missing = 0/A. Persisted as `Port`
+# in the device's [inputN] section; minicast routes the device's state to
+# kcode[port] etc.
+PORTS = {}
+PORT_NAMES = ("Port A", "Port B", "Port C", "Port D")
+
+
+def device_port(dev_id):
+    return PORTS.get(dev_id, 0)
 
 TARGETS = [
     ("dpad_up", "Dpad Up"),
@@ -550,6 +805,8 @@ TARGETS = [
     ("btn_x", "Button X"),
     ("btn_y", "Button Y"),
     ("btn_start", "Button Start"),
+    ("btn_exit", "Exit Emulator"),
+    ("btn_screenshot", "Screenshot"),
     ("analog_x", "Analog X  (-127..127)"),
     ("analog_y", "Analog Y  (-127..127)"),
     ("trig_l", "Trigger Left  (0..255)"),
@@ -581,6 +838,8 @@ TARGET_CFG_KEYS = [
     ("btn_x", "ButtonX"),
     ("btn_y", "ButtonY"),
     ("btn_start", "ButtonStart"),
+    ("btn_exit", "ButtonExit"),
+    ("btn_screenshot", "ButtonScreenshot"),
     ("analog_x", "AxisX"),
     ("analog_y", "AxisY"),
     ("trig_l", "TriggerL"),
@@ -723,6 +982,11 @@ def load_input_config(cfg):
                     mappings[target] = m
         # a DeviceId-only section is an explicitly cleared device
         CONFIG[dev_id] = mappings
+        try:
+            port = int(cfg.get(section, "Port", fallback="0"))
+        except ValueError:
+            port = 0
+        PORTS[dev_id] = port if 0 <= port <= 3 else 0
 
 
 def save_input_config(cfg, devices):
@@ -744,11 +1008,15 @@ def save_input_config(cfg, devices):
         section = "input%d" % n
         cfg.add_section(section)
         cfg.set(section, "DeviceId", dev_id)
+        cfg.set(section, "Port", str(device_port(dev_id)))
         for target, cfg_key in TARGET_CFG_KEYS:
             m = mappings.get(target)
             if m is not None:
                 cfg.set(section, cfg_key, encode_mapping(m))
         n += 1
+    # NOTE: what maple device sits on each port is owned by the Dreamcast
+    # Peripherals page ([input] deviceN); mapping a device to a port does
+    # not force a controller onto that bus.
     save_cfg(cfg)
     return n
 
@@ -1169,12 +1437,17 @@ def test_screen(scr, devices, subtitle):
             os.close(fd)
 
 
+def port_label(cfg, port):
+    pid = get_port_peripheral(cfg, port)
+    return "%s [%s]" % (PORT_NAMES[port],
+                        PERIPHERAL_LABELS.get(pid, "Custom"))
+
+
 def device_list_screen(scr, devices, cfg):
     """Returns ("test", None), ("open", dev), or None to exit."""
     rows = [("back", None),
             ("header", "General"),
             ("test", None),
-            ("save", None),
             ("header", "Input Devices")]
     rows += [("dev", d) for d in devices]
     selectable = [i for i, r in enumerate(rows) if r[0] != "header"]
@@ -1206,10 +1479,9 @@ def device_list_screen(scr, devices, cfg):
                 text = "Back"
             elif kind == "test":
                 text = "Test (all devices)"
-            elif kind == "save":
-                text = "Save Changes"
             else:
-                active = "[Active]" if effective_config(payload) else ""
+                active = ("[Active: %s]" % PORT_NAMES[device_port(payload.id)]
+                          if effective_config(payload) else "")
                 text = "%-32s %-10s %s  %s" % (payload.name[:32],
                                                payload.kind,
                                                "[%s]" % payload.id, active)
@@ -1221,7 +1493,7 @@ def device_list_screen(scr, devices, cfg):
 
         if notice:
             safe_addstr(scr, h - 2, 1, notice, notice_attr)
-        footer = "UP/DOWN: select   ENTER/A: open"
+        footer = "UP/DOWN: select   ENTER/A: open   (changes save automatically)"
         safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
         scr.refresh()
 
@@ -1235,18 +1507,14 @@ def device_list_screen(scr, devices, cfg):
             kind, payload = rows[selectable[sel]]
             if kind == "back":
                 return None
-            if kind == "save":
-                n = save_input_config(cfg, devices)
-                notice = "Saved %d device config(s) to %s" % (n, CFG_PATH)
-                notice_attr = color(C_VALUE)
-                continue
             return (kind, payload)
 
 
-def device_screen(scr, dev):
+def device_screen(scr, dev, cfg, devices):
     # rows: ("back",), ("test",), ("header", text), ("map", key, label),
     #       ("remove",)
-    rows = [("back",), ("header", "General"), ("test",),
+    # every mutation is saved to emu.cfg immediately (auto-save)
+    rows = [("back",), ("header", "General"), ("test",), ("port",),
             ("header", "Mappings")]
     rows += [("map", key, label) for key, label in TARGETS]
     rows += [("header", "Danger Zone"), ("remove",)]
@@ -1285,6 +1553,9 @@ def device_screen(scr, dev):
             elif row[0] == "test":
                 text = "Test this device"
                 value = ""
+            elif row[0] == "port":
+                text = "%-26s" % "Mapped to"
+                value = "< %s >" % port_label(cfg, device_port(dev.id))
             elif row[0] == "remove":
                 text = "Remove configuration"
                 value = ""
@@ -1301,7 +1572,7 @@ def device_screen(scr, dev):
             else:
                 safe_addstr(scr, y, 4, text)
                 safe_addstr(scr, y, 6 + len(text) + 2, value, color(C_VALUE))
-        footer = "UP/DOWN: select   ENTER/A: map/activate"
+        footer = "UP/DOWN: select   ENTER/A: map/activate   LEFT/RIGHT: port"
         safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
 
     while True:
@@ -1309,10 +1580,22 @@ def device_screen(scr, dev):
         scr.refresh()
 
         ch = nav_getch(scr)
+        row = rows[selectable[sel]]
         if ch == curses.KEY_UP:
             sel = (sel - 1) % len(selectable)
         elif ch == curses.KEY_DOWN:
             sel = (sel + 1) % len(selectable)
+        elif (ch in (curses.KEY_LEFT, curses.KEY_RIGHT) or ch in KEY_ENTER) \
+                and row[0] == "port":
+            step = -1 if ch == curses.KEY_LEFT else 1
+            p = device_port(dev.id)
+            for _ in range(4):
+                p = (p + step) % 4
+                if port_accepts(cfg, p, dev.kind):
+                    break
+            if port_accepts(cfg, p, dev.kind):
+                PORTS[dev.id] = p
+                save_input_config(cfg, devices)
         elif ch in KEY_ENTER:
             idx = selectable[sel]
             row = rows[idx]
@@ -1324,6 +1607,7 @@ def device_screen(scr, dev):
             elif row[0] == "remove":
                 # explicit empty config: overrides the per-kind defaults
                 CONFIG[dev.id] = {}
+                save_input_config(cfg, devices)
             else:  # map
                 target = row[1]
                 m = capture_mapping(
@@ -1352,11 +1636,13 @@ def device_screen(scr, dev):
                     if dev.id not in CONFIG:
                         CONFIG[dev.id] = dict(effective_config(dev))
                     CONFIG[dev.id][target] = m
+                    save_input_config(cfg, devices)
                 nav_flush()  # the captured press also landed in the nav fds
 
 
 def input_mapper(scr, cfg):
-    """Input configuration UI. Returns when the user backs out."""
+    """Input configuration UI (auto-saves). Returns when the user backs
+    out."""
     while True:
         devices = scan_devices()
         res = device_list_screen(scr, devices, cfg)
@@ -1367,7 +1653,7 @@ def input_mapper(scr, cfg):
             test_screen(scr, devices, "Testing all devices")
             nav_flush()
         else:
-            device_screen(scr, dev)
+            device_screen(scr, dev, cfg, devices)
 
 
 # -------------------------------------------------------------- curses ui ---
@@ -1436,9 +1722,10 @@ def error_screen(scr, lines):
 
 
 def main_menu_screen(scr, games, game_dirs):
-    """Returns an action tuple or None to exit."""
+    """Returns ("configure",), ("bios",), ("game", label, path), or None
+    to exit."""
     rows = [("header", "System"),
-            ("inputmap", None),
+            ("configure", None),
             ("bios", None),
             ("exit", None),
             ("header", "Disc Images")]
@@ -1469,8 +1756,8 @@ def main_menu_screen(scr, games, game_dirs):
                 safe_addstr(scr, y, 2, "[ %s ]" % payload,
                             color(C_HEADER, curses.A_BOLD))
                 continue
-            if kind == "inputmap":
-                text = "Configure Input"
+            if kind == "configure":
+                text = "Configure"
             elif kind == "bios":
                 text = "Boot To Bios"
             elif kind == "exit":
@@ -1501,16 +1788,152 @@ def main_menu_screen(scr, games, game_dirs):
             return (kind,)
 
 
-def config_screen(scr, cfg, game_rel):
-    """Returns True to launch, False to go back to the games list."""
-    # rows: ("launch",), ("back",), ("header", text), ("opt", Option)
-    rows = [("launch",), ("back",)]
-    for group, opts in OPTION_GROUPS:
-        rows.append(("header", group))
-        for opt in opts:
-            rows.append(("opt", opt))
+def rebuild_nav():
+    """Recreates the evdev nav pump after input mappings may have changed."""
+    if NAV[0] is not None:
+        NAV[0].close()
+        NAV[0] = NavPump()
+
+
+def confirm_screen(scr, lines, subtitle="Are you sure?", yes="Yes", no="No"):
+    """Modal two-way dialog; returns True on the yes option. Defaults to
+    the no option."""
+    sel = 1  # 0 = yes, 1 = no
+    while True:
+        draw_title(scr, subtitle)
+        h, w = scr.getmaxyx()
+        y = max(4, h // 2 - len(lines) // 2 - 2)
+        for i, line in enumerate(lines):
+            safe_addstr(scr, y + i, max(0, (w - len(line)) // 2), line,
+                        curses.A_BOLD if i == 0 else 0)
+        yb = min(h - 3, y + len(lines) + 2)
+        labels = ("  %s  " % yes, "  %s  " % no)
+        x = max(0, w // 2 - 14)
+        for i, lab in enumerate(labels):
+            if i == sel:
+                safe_addstr(scr, yb, x, "> " + lab,
+                            color(C_SEL, curses.A_BOLD))
+            else:
+                safe_addstr(scr, yb, x, "  " + lab)
+            x += len(lab) + 8
+        safe_addstr(scr, h - 1, 1, "LEFT/RIGHT: select   ENTER/A: confirm",
+                    color(C_DIM))
+        scr.refresh()
+        ch = nav_getch(scr)
+        if ch in (curses.KEY_LEFT, curses.KEY_RIGHT,
+                  curses.KEY_UP, curses.KEY_DOWN):
+            sel ^= 1
+        elif ch in KEY_ENTER:
+            return sel == 0
+
+
+OVERCLOCK_WARNING = [
+    "Enable the 1 GHz CPU overclock?",
+    "",
+    "This runs the DE10-Nano's HPS above its stock",
+    "800 MHz. It may be unstable on some boards:",
+    "crashes, corrupted data or hangs are possible.",
+    "The stock clock is restored when the emulator",
+    "exits.",
+]
+
+RESTORE_WARNING = [
+    "Restore ALL settings to their defaults?",
+    "",
+    "Every Configure option, the Dreamcast peripheral",
+    "assignments and all saved input mappings will be",
+    "reset. This cannot be undone.",
+]
+
+VERSION_WARNING = [
+    "Configuration reset required",
+    "",
+    "Your DreamSTer configuration was written by a",
+    "different release (expected version %s)." % CFG_VERSION,
+    "",
+    "OK resets ALL configuration to defaults.",
+    "Exit returns to MiSTer, leaving it untouched.",
+]
+
+
+def peripherals_screen(scr, cfg):
+    """Dreamcast Peripherals: what maple device sits on each port."""
+    rows = [("back",), ("header", "Maple Ports")]
+    rows += [("port", p) for p in range(4)]
     selectable = [i for i, r in enumerate(rows) if r[0] != "header"]
-    sel = 0  # index into selectable; 0 == Launch (default)
+    sel = 0
+    while True:
+        draw_title(scr, "Dreamcast Peripherals")
+        h, w = scr.getmaxyx()
+        list_top = 4
+        for i, row in enumerate(rows):
+            y = list_top + i
+            is_sel = (selectable[sel] == i)
+            if row[0] == "header":
+                safe_addstr(scr, y, 2, "[ %s ]" % row[1],
+                            color(C_HEADER, curses.A_BOLD))
+                continue
+            if row[0] == "back":
+                text = "Back"
+                value = ""
+            else:
+                port = row[1]
+                text = "%-26s" % PORT_NAMES[port]
+                pid = get_port_peripheral(cfg, port)
+                value = "< %s >" % PERIPHERAL_LABELS.get(pid, "Custom")
+            if is_sel:
+                safe_addstr(scr, y, 1, " " * (w - 3), color(C_SEL))
+                safe_addstr(scr, y, 2, "> " + text, color(C_SEL, curses.A_BOLD))
+                safe_addstr(scr, y, 6 + len(text) + 2, value,
+                            color(C_SEL, curses.A_BOLD))
+            else:
+                safe_addstr(scr, y, 4, text)
+                safe_addstr(scr, y, 6 + len(text) + 2, value, color(C_VALUE))
+        footer = "UP/DOWN: select   LEFT/RIGHT/ENTER/A: change"
+        safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
+        scr.refresh()
+
+        ch = nav_getch(scr)
+        row = rows[selectable[sel]]
+        if ch == curses.KEY_UP:
+            sel = (sel - 1) % len(selectable)
+        elif ch == curses.KEY_DOWN:
+            sel = (sel + 1) % len(selectable)
+        elif ch in KEY_ENTER and row[0] == "back":
+            return
+        elif (ch in (curses.KEY_LEFT, curses.KEY_RIGHT) or ch in KEY_ENTER) \
+                and row[0] == "port":
+            port = row[1]
+            step = -1 if ch == curses.KEY_LEFT else 1
+            ids = [pid for pid, _, _ in PERIPHERALS]
+            pid = get_port_peripheral(cfg, port)
+            idx = ids.index(pid) if pid in ids else -1
+            set_port_peripheral(cfg, port, ids[(idx + step) % len(ids)])
+            save_cfg(cfg)
+
+
+def configure_screen(scr, cfg, subtitle, launch=False):
+    """The Configure menu. With launch=True a Launch entry is pinned on
+    top (pre-launch flow); returns True to launch, False/None otherwise."""
+    # rows: ("launch",), ("back",), ("header", text), ("opt", Option),
+    #       ("page", label, target), ("restore",)
+    rows = [("launch",)] if launch else []
+    rows += [("back",)]
+    rows += [("header", "Dreamcast"),
+             ("opt", REGION_OPT), ("opt", CABLE_OPT),
+             ("page", "Dreamcast Peripherals", "periph")]
+    rows += [("header", "DE10-Nano"),
+             ("opt", OVERCLOCK_OPT),
+             ("page", "Input Mapping", "inputmap")]
+    rows += [("header", "Minicast"),
+             ("opt", TIMEREC_OPT), ("opt", AUDIO_OPT), ("opt", FPS_OPT),
+             ("opt", OPTMODE_OPT)]
+    rows += [("opt", o) for o in OPT_ITEMS]
+    rows += [("header", "polly2"),
+             ("opt", AUTORESET_OPT), ("opt", CLOCK_OPT), ("opt", DUMP_OPT)]
+    rows += [("header", "Danger Zone"), ("restore",)]
+    selectable = [i for i, r in enumerate(rows) if r[0] != "header"]
+    sel = 0  # Launch (pre-launch flow) / Back
 
     # headers take two lines (blank + text), everything else one
     heights = [2 if r[0] == "header" else 1 for r in rows]
@@ -1522,7 +1945,7 @@ def config_screen(scr, cfg, game_rel):
     top = 0
 
     while True:
-        draw_title(scr, game_rel)
+        draw_title(scr, subtitle)
         h, w = scr.getmaxyx()
         list_top = 4
         list_h = max(1, h - list_top - 2)
@@ -1556,11 +1979,21 @@ def config_screen(scr, cfg, game_rel):
             elif row[0] == "header":
                 put(yv + 1, 2, "[ %s ]" % row[1],
                     color(C_HEADER, curses.A_BOLD))
+            elif row[0] in ("page", "restore"):
+                text = ("Restore Defaults" if row[0] == "restore"
+                        else "%s ..." % row[1])
+                if is_sel:
+                    put(yv, 4, "> " + text, color(C_SEL, curses.A_BOLD))
+                else:
+                    put(yv, 6, text)
             else:
                 opt = row[1]
                 label = "%-28s" % opt.label
                 value = "< %s >" % opt.display(cfg)
-                if is_sel:
+                if not opt.enabled(cfg):
+                    put(yv, 6, label, color(C_DIM))
+                    put(yv, 6 + len(label) + 2, value, color(C_DIM))
+                elif is_sel:
                     put(yv, 4, "> " + label, color(C_SEL, curses.A_BOLD))
                     put(yv, 6 + len(label) + 2, value,
                         color(C_SEL, curses.A_BOLD))
@@ -1572,19 +2005,48 @@ def config_screen(scr, cfg, game_rel):
         safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
         scr.refresh()
 
+        def move_sel(delta):
+            # skip disabled options (grayed out, not selectable)
+            s = sel
+            for _ in range(len(selectable)):
+                s = (s + delta) % len(selectable)
+                r = rows[selectable[s]]
+                if r[0] != "opt" or r[1].enabled(cfg):
+                    return s
+            return sel
+
         ch = nav_getch(scr)
         row = rows[selectable[sel]]
         if ch == curses.KEY_UP:
-            sel = (sel - 1) % len(selectable)
+            sel = move_sel(-1)
         elif ch == curses.KEY_DOWN:
-            sel = (sel + 1) % len(selectable)
+            sel = move_sel(1)
         elif ch in KEY_ENTER and row[0] == "launch":
             return True
         elif ch in KEY_ENTER and row[0] == "back":
             return False
+        elif ch in KEY_ENTER and row[0] == "page":
+            if row[2] == "periph":
+                peripherals_screen(scr, cfg)
+            else:
+                input_mapper(scr, cfg)
+                rebuild_nav()
+        elif ch in KEY_ENTER and row[0] == "restore":
+            if confirm_screen(scr, RESTORE_WARNING, "Danger Zone"):
+                restore_defaults(cfg)
+                rebuild_nav()
         elif ch in (curses.KEY_LEFT, curses.KEY_RIGHT) or ch in KEY_ENTER:
-            if row[0] == "opt":
-                row[1].cycle(cfg, -1 if ch == curses.KEY_LEFT else 1)
+            if row[0] == "opt" and row[1].enabled(cfg):
+                opt = row[1]
+                if opt is OVERCLOCK_OPT:
+                    # 1 GHz only engages after an explicit warning
+                    new = "0" if opt.current(cfg) == "1" else "1"
+                    if new == "1" and not confirm_screen(
+                            scr, OVERCLOCK_WARNING, "DE10-Nano Overclock"):
+                        continue
+                    opt.set(cfg, new)
+                else:
+                    opt.cycle(cfg, -1 if ch == curses.KEY_LEFT else 1)
                 save_cfg(cfg)
 
 
@@ -1605,6 +2067,11 @@ def ui(scr):
         return None
 
     cfg = load_cfg()
+    if cfg.get("dreamster", "Version", fallback="").strip() != CFG_VERSION:
+        if not confirm_screen(scr, VERSION_WARNING, "Configuration Reset",
+                              yes="OK", no="Exit"):
+            return None
+        cfg = reset_all_configuration()
     load_input_config(cfg)
 
     game_dirs = resolve_game_dirs(cfg)
@@ -1625,10 +2092,8 @@ def ui(scr):
             res = main_menu_screen(scr, games, game_dirs)
             if res is None:
                 return None
-            if res[0] == "inputmap":
-                input_mapper(scr, cfg)
-                NAV[0].close()
-                NAV[0] = NavPump()  # mappings may have changed
+            if res[0] == "configure":
+                configure_screen(scr, cfg, "Configure")
                 continue
             if res[0] == "bios":
                 game = "nodisk"
@@ -1636,7 +2101,7 @@ def ui(scr):
             else:
                 game = res[2]
                 subtitle = res[1]
-            if config_screen(scr, cfg, subtitle):
+            if configure_screen(scr, cfg, subtitle, launch=True):
                 return game
     finally:
         NAV[0].close()
@@ -1651,8 +2116,50 @@ def run(cmd, **kw):
     return subprocess.call(cmd, **kw)
 
 
+# The MiSTer main binary that launched us: pid = our parent, exe read from
+# /proc/<ppid>/exe. Falls back to killall + MISTER_BIN when the parent is
+# something else (e.g. a shell during development).
+MISTER = {"pid": None, "exe": MISTER_BIN}
+
+
+def detect_parent_mister():
+    ppid = os.getppid()
+    try:
+        exe = os.readlink("/proc/%d/exe" % ppid)
+    except OSError:
+        return
+    exe = exe.replace(" (deleted)", "")
+    if os.path.basename(exe) == os.path.basename(MISTER_BIN):
+        MISTER["pid"] = ppid
+        MISTER["exe"] = exe
+
+
+def _proc_running(pid):
+    """True while pid exists and is not a zombie."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(") ", 1)[1][0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def kill_mister():
     """Stops the MiSTer main binary so it releases input/video/audio."""
+    pid = MISTER["pid"]
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        for _ in range(20):  # wait up to 2s for it to actually go away
+            if not _proc_running(pid):
+                return
+            time.sleep(0.1)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        return
     subprocess.call(["killall", "MiSTer"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):  # wait up to 2s for it to actually go away
@@ -1669,23 +2176,59 @@ def restart_mister():
         run([LOAD_BITSTREAM, MENU_RBF], cwd=MINICAST_DIR)
     except OSError as e:
         print("menu core reload failed: %s" % e)
+    mister = MISTER["exe"] or MISTER_BIN
     try:
         with open(os.devnull, "rb+") as devnull:
-            subprocess.Popen([MISTER_BIN], cwd=os.path.dirname(MISTER_BIN),
+            subprocess.Popen([mister], cwd=os.path.dirname(mister),
                              stdin=devnull, stdout=devnull, stderr=devnull,
                              start_new_session=True)
     except OSError as e:
         print("MiSTer restart failed: %s" % e)
 
 
-def launch(game):
+CPUFREQ_DIR = "/sys/devices/system/cpu/cpu0/cpufreq"
+
+
+def _cpufreq_read(name):
+    try:
+        with open(os.path.join(CPUFREQ_DIR, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _cpufreq_write(name, value):
+    try:
+        with open(os.path.join(CPUFREQ_DIR, name), "w") as f:
+            f.write(value)
+        return True
+    except OSError as e:
+        print("cpufreq: %s <- %s failed: %s" % (name, value, e))
+        return False
+
+
+def launch(game, overclock):
     print("\n=== %s ===" % TITLE)
     print("Launching: %s\n" % game)
 
-    run(["insmod", MEM_WC], cwd=MINICAST_DIR)
-    run([LOAD_BITSTREAM, BITSTREAM_RBF], cwd=MINICAST_DIR)
-    run([SETUP_HDMI], cwd=MINICAST_DIR)
-    run([MINICAST_ELF, game], cwd=MINICAST_DIR)
+    prev_gov = None
+    if overclock:
+        prev_gov = _cpufreq_read("scaling_governor")
+        print("overclock: CPU -> 1 GHz, governor -> performance")
+        _cpufreq_write("scaling_governor", "performance")
+        _cpufreq_write("scaling_max_freq", "1000000")
+
+    try:
+        run(["insmod", MEM_WC], cwd=MINICAST_DIR)
+        run([LOAD_BITSTREAM, BITSTREAM_RBF], cwd=MINICAST_DIR)
+        run([SETUP_HDMI], cwd=MINICAST_DIR)
+        run([MINICAST_ELF, game], cwd=MINICAST_DIR)
+    finally:
+        if overclock:
+            print("overclock: restoring CPU to 800 MHz")
+            _cpufreq_write("scaling_max_freq", "800000")
+            if prev_gov:
+                _cpufreq_write("scaling_governor", prev_gov)
 
 
 def main():
@@ -1696,16 +2239,21 @@ def main():
     except OSError:
         pass
 
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # actually, i like terminating via sigint ~ skmp
+    # signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Take the box over up front: with MiSTer gone the console keyboard only
     # reaches us through the tty and gamepads are free for the nav pump.
     # Whatever happens after this point, MiSTer comes back on exit.
+    detect_parent_mister()
     kill_mister()
     try:
         game = curses.wrapper(ui)
         if game is not None:
-            launch(game)
+            cfg = load_cfg()
+            overclock = cfg.get("dreamster", "Overclock",
+                                fallback="0").strip() == "1"
+            launch(game, overclock)
     finally:
         restart_mister()
 
