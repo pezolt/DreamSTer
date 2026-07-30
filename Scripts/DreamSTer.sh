@@ -51,6 +51,9 @@ GAME_EXTS = (".cdi", ".cue", ".gdi")
 
 KEY_ENTER = (curses.KEY_ENTER, 10, 13)
 
+with open("/tmp/CORENAME", "w") as text_file:
+    print(f"DREAMCAST", file=text_file)
+
 # There is deliberately NO ESC/B "back" shortcut: a laggy arrow-key escape
 # sequence decays into a bare tty ESC, which used to quit menus at random.
 # tty ESC (and any other unmapped key) is ignored; every screen navigates
@@ -2210,6 +2213,15 @@ def _cpufreq_write(name, value):
 def launch(game, overclock):
     print("\n=== %s ===" % TITLE)
     print("Launching: %s\n" % game)
+
+    basename = os.path.basename(game).split('.')[0]
+    dirname = os.path.dirname(game)
+    with open("/tmp/FILESELECT", "w") as text_file:
+        print(f"selected", file=text_file)
+    with open("/tmp/CURRENTPATH", "w") as text_file:
+        print(f"{basename}", file=text_file)
+    with open("/tmp/FULLPATH", "w") as text_file:
+        print(f"{dirname}", file=text_file)
 
     prev_gov = None
     if overclock:
