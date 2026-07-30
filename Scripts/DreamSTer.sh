@@ -553,6 +553,15 @@ def drain(fd):
 # the per-kind defaults below; an explicit empty dict (after "Remove
 # configuration") means inactive. Persisted in emu.cfg [input0]..[inputN].
 CONFIG = {}
+# device id -> maple port 0..3 (A..D); missing = 0/A. Persisted as `Port`
+# in the device's [inputN] section; minicast routes the device's state to
+# kcode[port] etc.
+PORTS = {}
+PORT_NAMES = ("Port A", "Port B", "Port C", "Port D")
+
+
+def device_port(dev_id):
+    return PORTS.get(dev_id, 0)
 
 TARGETS = [
     ("dpad_up", "Dpad Up"),
@@ -741,6 +750,11 @@ def load_input_config(cfg):
                     mappings[target] = m
         # a DeviceId-only section is an explicitly cleared device
         CONFIG[dev_id] = mappings
+        try:
+            port = int(cfg.get(section, "Port", fallback="0"))
+        except ValueError:
+            port = 0
+        PORTS[dev_id] = port if 0 <= port <= 3 else 0
 
 
 def save_input_config(cfg, devices):
@@ -758,15 +772,27 @@ def save_input_config(cfg, devices):
         if re.match(r"input\d+$", section):
             cfg.remove_section(section)
     n = 0
+    used_ports = set()
     for dev_id, mappings in CONFIG.items():
         section = "input%d" % n
         cfg.add_section(section)
         cfg.set(section, "DeviceId", dev_id)
+        cfg.set(section, "Port", str(device_port(dev_id)))
+        if mappings:
+            used_ports.add(device_port(dev_id))
         for target, cfg_key in TARGET_CFG_KEYS:
             m = mappings.get(target)
             if m is not None:
                 cfg.set(section, cfg_key, encode_mapping(m))
         n += 1
+    # a mapped port needs a maple controller on its bus: [input] deviceN
+    # (1-based) = 0 (SegaController). Only flip ports actually in use.
+    if not cfg.has_section("input"):
+        cfg.add_section("input")
+    for port in sorted(used_ports):
+        key = "device%d" % (port + 1)
+        if cfg.get("input", key, fallback="8").strip() != "0":
+            cfg.set("input", key, "0")
     save_cfg(cfg)
     return n
 
@@ -1227,7 +1253,8 @@ def device_list_screen(scr, devices, cfg):
             elif kind == "save":
                 text = "Save Changes"
             else:
-                active = "[Active]" if effective_config(payload) else ""
+                active = ("[Active: %s]" % PORT_NAMES[device_port(payload.id)]
+                          if effective_config(payload) else "")
                 text = "%-32s %-10s %s  %s" % (payload.name[:32],
                                                payload.kind,
                                                "[%s]" % payload.id, active)
@@ -1264,7 +1291,7 @@ def device_list_screen(scr, devices, cfg):
 def device_screen(scr, dev):
     # rows: ("back",), ("test",), ("header", text), ("map", key, label),
     #       ("remove",)
-    rows = [("back",), ("header", "General"), ("test",),
+    rows = [("back",), ("header", "General"), ("test",), ("port",),
             ("header", "Mappings")]
     rows += [("map", key, label) for key, label in TARGETS]
     rows += [("header", "Danger Zone"), ("remove",)]
@@ -1303,6 +1330,9 @@ def device_screen(scr, dev):
             elif row[0] == "test":
                 text = "Test this device"
                 value = ""
+            elif row[0] == "port":
+                text = "%-26s" % "Mapped to"
+                value = "< %s >" % PORT_NAMES[device_port(dev.id)]
             elif row[0] == "remove":
                 text = "Remove configuration"
                 value = ""
@@ -1319,7 +1349,7 @@ def device_screen(scr, dev):
             else:
                 safe_addstr(scr, y, 4, text)
                 safe_addstr(scr, y, 6 + len(text) + 2, value, color(C_VALUE))
-        footer = "UP/DOWN: select   ENTER/A: map/activate"
+        footer = "UP/DOWN: select   ENTER/A: map/activate   LEFT/RIGHT: port"
         safe_addstr(scr, h - 1, 1, footer, color(C_DIM))
 
     while True:
@@ -1327,10 +1357,15 @@ def device_screen(scr, dev):
         scr.refresh()
 
         ch = nav_getch(scr)
+        row = rows[selectable[sel]]
         if ch == curses.KEY_UP:
             sel = (sel - 1) % len(selectable)
         elif ch == curses.KEY_DOWN:
             sel = (sel + 1) % len(selectable)
+        elif (ch in (curses.KEY_LEFT, curses.KEY_RIGHT) or ch in KEY_ENTER) \
+                and row[0] == "port":
+            step = -1 if ch == curses.KEY_LEFT else 1
+            PORTS[dev.id] = (device_port(dev.id) + step) % 4
         elif ch in KEY_ENTER:
             idx = selectable[sel]
             row = rows[idx]
