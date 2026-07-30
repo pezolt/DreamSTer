@@ -1,3 +1,5 @@
+<img width="1672" height="941" alt="banner" src="https://github.com/user-attachments/assets/470a8151-3fad-44cb-a137-57d403b1b5f8" />
+
 # DreamSTer
 polly2-rtl, minicast and a python TUI rolled together for the MiSTer environment.
 
