@@ -2233,7 +2233,8 @@ def main():
     except OSError:
         pass
 
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # actually, i like terminating via sigint ~ skmp
+    # signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Take the box over up front: with MiSTer gone the console keyboard only
     # reaches us through the tty and gamepads are free for the nav pump.
