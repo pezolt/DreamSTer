@@ -2188,27 +2188,67 @@ def restart_mister():
     except OSError as e:
         print("MiSTer restart failed: %s" % e)
 
-
 CPUFREQ_DIR = "/sys/devices/system/cpu/cpu0/cpufreq"
+CPUFREQ_BOOST = "/sys/devices/system/cpu/cpufreq"
 
-
-def _cpufreq_read(name):
+def _cpufreq_read_common(procpath, name):
     try:
-        with open(os.path.join(CPUFREQ_DIR, name)) as f:
+        with open(os.path.join(procpath, name)) as f:
             return f.read().strip()
     except OSError:
         return None
 
-
-def _cpufreq_write(name, value):
+def _cpufreq_write_common(procpath, name, value):
     try:
-        with open(os.path.join(CPUFREQ_DIR, name), "w") as f:
+        with open(os.path.join(procpath, name), "w") as f:
             f.write(value)
         return True
     except OSError as e:
         print("cpufreq: %s <- %s failed: %s" % (name, value, e))
         return False
 
+def _cpufreq_read(name):
+    return _cpufreq_read_common(CPUFREQ_DIR, name)
+
+def _cpufreq_write(name, value):
+    return _cpufreq_write_common(CPUFREQ_DIR, name, value)
+
+def _cpufreq_boost_read(name):
+    return _cpufreq_read_common(CPUFREQ_BOOST, name)
+
+def _cpufreq_boost_write(name, value):
+    return _cpufreq_write_common(CPUFREQ_BOOST, name, value)
+
+CPUFREQ_DIR = "/sys/devices/system/cpu/cpu0/cpufreq"
+CPUFREQ_BOOST = "/sys/devices/system/cpu/cpufreq"
+
+def _cpufreq_read_common(procpath, name):
+    try:
+        with open(os.path.join(procpath, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+def _cpufreq_write_common(procpath, name, value):
+    try:
+        with open(os.path.join(procpath, name), "w") as f:
+            f.write(value)
+        return True
+    except OSError as e:
+        print("cpufreq: %s <- %s failed: %s" % (name, value, e))
+        return False
+
+def _cpufreq_read(name):
+    return _cpufreq_read_common(CPUFREQ_DIR, name)
+
+def _cpufreq_write(name, value):
+    return _cpufreq_write_common(CPUFREQ_DIR, name, value)
+
+def _cpufreq_boost_read(name):
+    return _cpufreq_read_common(CPUFREQ_BOOST, name)
+
+def _cpufreq_boost_write(name, value):
+    return _cpufreq_write_common(CPUFREQ_BOOST, name, value)
 
 def launch(game, overclock):
     print("\n=== %s ===" % TITLE)
@@ -2225,6 +2265,13 @@ def launch(game, overclock):
 
     prev_gov = None
     if overclock:
+        if is_kernel_major_ge_6():
+            # modprobe socfpga-cpufreq
+            run(["modprobe", "socfpga-cpufreq"])
+            # Enable boost to allow for higher frequencies than 800000
+            # NOTE: This defaults to 1200000 when boost is enabled.
+            _cpufreq_boost_write("boost", "1")
+
         prev_gov = _cpufreq_read("scaling_governor")
         print("overclock: CPU -> 1 GHz, governor -> performance")
         _cpufreq_write("scaling_governor", "performance")
