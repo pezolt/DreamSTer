@@ -2188,36 +2188,23 @@ def restart_mister():
     except OSError as e:
         print("MiSTer restart failed: %s" % e)
 
-CPUFREQ_DIR = "/sys/devices/system/cpu/cpu0/cpufreq"
-CPUFREQ_BOOST = "/sys/devices/system/cpu/cpufreq"
-
-def _cpufreq_read_common(procpath, name):
+def is_kernel_major_ge_6() -> bool:
+    """
+    Checks if the host Linux kernel major version is greater than or equal to 6.
+    Returns True if major >= 6, otherwise returns False.
+    """
     try:
-        with open(os.path.join(procpath, name)) as f:
-            return f.read().strip()
-    except OSError:
-        return None
+        # Get release string (e.g., '6.1.0-21-amd64')
+        release_string = os.uname().release
 
-def _cpufreq_write_common(procpath, name, value):
-    try:
-        with open(os.path.join(procpath, name), "w") as f:
-            f.write(value)
-        return True
-    except OSError as e:
-        print("cpufreq: %s <- %s failed: %s" % (name, value, e))
+        # Split and extract the first number
+        major_version = int(release_string.split('.')[0])
+
+        return major_version >= 6
+
+    except (AttributeError, IndexError, ValueError):
+        # Fallback to False if not on Linux or parsing fails
         return False
-
-def _cpufreq_read(name):
-    return _cpufreq_read_common(CPUFREQ_DIR, name)
-
-def _cpufreq_write(name, value):
-    return _cpufreq_write_common(CPUFREQ_DIR, name, value)
-
-def _cpufreq_boost_read(name):
-    return _cpufreq_read_common(CPUFREQ_BOOST, name)
-
-def _cpufreq_boost_write(name, value):
-    return _cpufreq_write_common(CPUFREQ_BOOST, name, value)
 
 CPUFREQ_DIR = "/sys/devices/system/cpu/cpu0/cpufreq"
 CPUFREQ_BOOST = "/sys/devices/system/cpu/cpufreq"
